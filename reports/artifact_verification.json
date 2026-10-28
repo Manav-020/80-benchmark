@@ -1,0 +1,14 @@
+{
+  "completed_runs": 540,
+  "partitions": 54,
+  "diffusion_fits": 162,
+  "all_generator_updates": 2000,
+  "matched_features_and_scalers": true,
+  "classifier_statistics_match_real_training_rows": true,
+  "generator_statistics_match_real_training_rows": true,
+  "train_test_disjoint": true,
+  "metrics_match_predictions": true,
+  "sampler_replay_matches_saved_synthetic_means": true,
+  "all_class_training_neighbor_checks_saved": true,
+  "fingerprint": "623e94c182280a17869938ceaffb67243405b8741444067a76956ab98831a686"
+}

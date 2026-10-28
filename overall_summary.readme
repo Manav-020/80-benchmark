@@ -1,0 +1,803 @@
+# Overall project summary: diffusion augmentation for cervical DNA methylation
+
+**Documentation-only verification.** This summary describes the implementation and saved completed experiments in this directory. It recalculates held-out metrics from saved predictions; it does not retrain models, select a new seed, change labels, or modify the existing README or reports.
+
+## 1. Research question and the meaning of the scores
+
+The question was whether adding class-conditional diffusion-generated methylation samples improves **Normal-versus-CIN3 classification** compared with real training data alone, repeating real samples, or creating interpolated samples with the Synthetic Minority Over-sampling Technique (SMOTE). DNA methylation measurements describe chemical modification of DNA at measured sites. Here a CpG is a cytosine–guanine site, and each sample is represented by a vector of methylation **beta values**, bounded between zero and one. The working hypothesis is that these molecular profiles may distinguish the deposited diagnosis groups, making methylation a candidate predictive input. Diagnosis provides the supervised target. The project tests those predictive associations; it does not establish that a selected site causes disease.
+
+Normal is label **0** and CIN3 is label **1**, the positive class. CIN3 means cervical intraepithelial neoplasia grade 3, a high-grade preinvasive abnormality. Invasive cancer is excluded from this binary task. “Normal” follows the source diagnosis and is not a guarantee of absence of human papillomavirus (HPV) or every other risk factor. This is a research classification exercise, not a clinical diagnostic product.
+
+The motivation for augmentation is that each cohort has very few real samples relative to the number of measured CpGs. A generator might supply useful additional training variation. It might also distort the distribution, overfit or memorize. The experiment evaluates that possibility using real held-out samples rather than assuming synthetic data are beneficial.
+
+**The exploratory benchmark is at least 80.00% balanced accuracy, not ordinary accuracy or ROC AUC.** It was not a required outcome or a tuning target. The implemented decision threshold is fixed at probability 0.5.
+
+- **CIN3 sensitivity/recall** = TP/(TP+FN): fraction of true CIN3 samples detected.
+- **Normal specificity** = TN/(TN+FP): fraction of true Normal samples correctly rejected as CIN3.
+- **Balanced accuracy (BA)** = (sensitivity + specificity)/2: gives both classes equal weight.
+- **Ordinary accuracy** = (TP+TN)/N: weights samples equally and is affected by class proportions.
+- **ROC AUC** is the area under the receiver-operating-characteristic curve, calculated from continuous CIN3 probabilities. It measures ranking across thresholds; it is not a percent-correct score at the fixed threshold.
+- **Precision** = TP/(TP+FP): fraction of predicted CIN3 samples that are actually CIN3.
+- **F1** = 2TP/(2TP+FP+FN): combines precision and recall. This summary uses zero when precision/F1 has a zero denominator; it does not omit such runs.
+
+TP, TN, FP and FN mean true positive, true negative, false positive and false negative, respectively. A high AUC or ordinary accuracy alone does not satisfy the balanced-accuracy benchmark.
+
+**Headline:** all 540 primary fold/method/seed runs completed, including 162 separate diffusion fits. Diffusion's mean held-out BA was lower than the matched real-only baseline in every one of the seven evaluated protocols. The strict GSE46306 within-dataset real-only, random-oversampling and SMOTE averages crossed 80.00% BA. Diffusion crossed it in some individual evaluations, but never in a protocol average. Every result remains exploratory because both datasets had been examined during earlier development.
+
+Sources: [fixed protocol](configs/protocol.yaml), [diffusion settings](configs/diffusion.yaml), [existing final report](reports/final_report.md), [completion verification](reports/verification.json), [evaluation code](src/methylation_diffusion/evaluation.py).
+
+## 2. Datasets, cohorts and provenance
+
+All primary outcomes concern **real samples**. Unique accession/author IDs were checked, but explicit person identifiers were not available to verify that every distinct sample is a distinct person. Counts below therefore refer precisely to unique sample IDs; repeated-person identity remains uncertain. Generated rows are never counted as new participants.
+
+The external data root is `../Cervical-Methylation-Feature-Selection/data`, corresponding in this workspace to `D:/coding/python/ML RESEARCH PROJECT/Cervical-Methylation-Feature-Selection/data`. The project reads it without copying the matrices into its repository. Official accessions: [GSE99511](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE99511) and [GSE46306](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE46306).
+
+| Cohort | Real samples | Normal | CIN3 | Excluded from that binary cohort | CpGs available before fold filtering |
+| --- | --- | --- | --- | --- | --- |
+| GSE99511 | 64 | 28 | 36 | 4 SCC | 482421 |
+| GSE46306 strict (primary) | 37 | 20 | 17 | 6 invasive cancer + 1 diagnosis-missing sample | 451345 |
+| GSE46306 reconciled (sensitivity) | 38 | 20 | 18 | 6 invasive cancer | 451345 |
+
+Table sources: [GSE99511 manifest](outputs/audits/GSE99511_manifest.csv), [strict manifest](outputs/audits/GSE46306_strict_manifest.csv), [reconciled manifest](outputs/audits/GSE46306_reconciled_manifest.csv), [data audit](reports/data_audit.json), [all-44-sample audit](reports/full_cohort_audit.json), [loader](src/methylation_diffusion/data.py). Manifests and predictions are local, Git-ignored artifacts; links will not resolve in a checkout that has not reproduced them.
+
+### 2.1 GSE99511
+
+The input matrix is `GSE99511/intermediate/beta_values.parquet`: originally **485,512 probe rows × 68 sample columns**, with Sentrix keys as columns. The loader keeps `cg` probe IDs (482,421 CpGs), maps each column one-to-one to `GSM_ID` using `GSE99511/metadata/sample_metadata.csv`, checks diagnoses against `GSE99511/metadata/metadata.csv`, excludes the four SCC (squamous cell carcinoma) samples, and transposes to samples × CpGs. All 64 Normal/CIN3 samples are retained. Both probe and sample IDs are unique. The saved raw-filename check confirms 68 paired Red/Green IDAT filenames agree with the metadata's accession and Sentrix mapping.
+
+The input reconstruction comes from the reference repository's methylprep route (`sesame=True`, float32 beta export, 450k manifest). Reference code and installed methylprep documentation support Noob/background and dye processing plus sesame-related masking as the intended route, but there is no independent rerun or complete historical execution log proving every original mask setting. Existing reconstruction masks are inherited. The reference repository's later globally filtered matrix retained 405,336 CpGs; **that global missingness-filtered matrix was not reused here**. This project starts before that filter and learns its own missingness filter in each real training partition. No additional SNP, cross-reactivity, sex-chromosome or detection-P filter is claimed.
+
+Among the 64 retained samples, beta values range from 0.0045688623 to 0.9957381487, with 4,957,225 missing cells (**16.06%** of the unfiltered CpG/sample matrix). Missingness is assessed before fold-local filtering and imputation. Six Sentrix chip IDs are verified; they support leave-one-chip-out evaluation. These chips are laboratory groups, not verified patient IDs.
+
+Sources: [provenance](docs/data_provenance.md), [raw mapping verification](reports/raw_mapping_verification.json), [source hashes](reports/source_hashes.json), [full local source paths/hashes](outputs/audits/sources.json).
+
+### 2.2 GSE46306
+
+The three inspected files are:
+
+1. `GSE46306/GSE46306_series_matrix.txt.gz`: metadata header provides sample accessions, author-title mapping and explicit diagnoses. **This local gzip is truncated.** The metadata header and first 1,000 table rows are readable; its damaged data table is not the modeling input.
+2. `GSE46306/GSE46306_Matrix_processed2.txt.gz`: complete supplementary processed matrix. Its individual sample columns supply model inputs. It contains 454,213 total probe rows and 44 samples; restricting to `cg` gives 451,345 CpGs. Supervised deposited group summaries, p-values and row ranking are not used as predictive features or as the project's feature ranking.
+3. `GSE46306/GSE46306_Matrix_signal_intensities2.txt.gz`: inspected for AVG_Beta/scale and missing-probe evidence, not used to restore features or train classifiers.
+
+All 44 processed samples have finite values in [0, 0.9993098], with no missing values in that file. Series metadata identify 20 Normal, 17 CIN3, six invasive cancers and one diagnosis-missing sample. The **strict 37-sample cohort is primary**. The reconciled sensitivity cohort adds GSM1128506 / author `2010041`: the supplementary header explicitly assigns it to `g1`, and diagnoses of the other mapped `g1` samples verify `g1=CIN3`. Supplementary cancer `g2` corresponds to the series description's `g3`; diagnosis metadata, rather than blindly equating group-code spellings, resolve that difference. The reconciled cohort was predefined, not selected because of its score.
+
+The strict cohort's beta maximum is 0.9982994199; the reconciled cohort's is 0.9993097782. Both have minimum zero and no missing cells. There are no duplicate accession or author IDs. No independently verified chip IDs or explicit repeated-person mapping was found. Position-like title prefixes were **not** converted into invented chip identities, so GSE46306 uses stratified rather than chip-grouped CV.
+
+**Scale contradiction:** GEO VALUE wording mentions arcsine-square-root transformation, whereas processing metadata describe beta values. In saved numerical checks, the first 12 supplementary probes (including one non-`cg` probe) match signal-file individual AVG_Beta values exactly across all 44 samples. Applying `arcsin(sqrt(beta))` to individual values reproduces deposited CIN3/Normal group means; these summaries, not the individual values, behave as transformed values. A separate comparison of 1,000 readable series-table probes against processed beta values has maximum absolute discrepancy about 2.98×10⁻⁸, consistent with float32 conversion. The project therefore uses **deposited individual beta values directly**, without a predictive-accuracy-based transformation choice. These are representative checks, not a complete series-table comparison, because the local series file is damaged.
+
+Probe `cg00979000` is absent from processed matrices but present in the signal file, with one blank AVG_Beta for author `2010040` / GSM1128505. It is not restored, and the reason for its deposited exclusion is unknown. The two modeling schemas share **451,345 CpG IDs**; transfer uses that intersection only.
+
+Sources: [scale evidence](reports/scale_checks.csv), [audit](reports/data_audit.json), [full cohort audit](reports/full_cohort_audit.json), [metadata header](outputs/audits/series_metadata.json), [loader](src/methylation_diffusion/data.py), [provenance limitations](docs/limitations.md).
+
+## 3. Complete implemented pipeline
+
+```mermaid
+flowchart TD
+    A[Read external beta matrices and verified metadata] --> B[Build fixed Normal/CIN3 cohorts]
+    B --> C[Load saved outer train/test assignments]
+    C --> D[Real training partition only]
+    C --> E[Hold out real evaluation samples]
+    D --> F[Fit missingness filter and median imputation]
+    F --> G[Remove low-variance features; fit ANOVA ranks; select 50 CpGs]
+    G --> H[Fit classifier beta-space scaler on real training rows]
+    G --> I{Training-data branch}
+    I --> J[Real rows only]
+    I --> K[Randomly repeat same-class real rows]
+    I --> L[SMOTE within each real training class]
+    I --> M[Fit logit-space scaler and conditional DDPM on real training rows]
+    M --> N[Reverse sample; inverse transform; add synthetic beta to real rows]
+    J --> O[Fit shrinkage LDA using real-fitted classifier scaler]
+    K --> O
+    L --> O
+    N --> O
+    H --> O
+    E --> P[Apply training-fitted filter, imputation, selected CpGs and classifier scaler]
+    F -. apply learned values only .-> P
+    G -. apply selected IDs only .-> P
+    H -. apply learned scaler only .-> P
+    O --> Q[Predict real held-out CIN3 probabilities; threshold 0.5]
+    P --> Q
+    Q --> R[Save prediction CSVs, metric JSONs and training diagnostics]
+    R --> S[Pool OOF predictions within each repeat/seed; then summarize metrics]
+```
+
+1. **Load and map labels.** Validate unique sample/probe IDs and align beta rows with diagnosis evidence. Build the fixed binary cohorts described above. Shared probe IDs in transfer are a schema restriction, not joint statistical normalization.
+2. **Separate training from evaluation.** Reuse the saved outer splits for every augmentation method. In transfer, the complete source cohort is the training partition and the target cohort is held out. No tuning or inner CV was performed.
+3. **Learn missingness handling from real training rows only.** Drop probes whose training missingness exceeds 25.00%; fit a median per surviving probe and use those same medians for held-out samples. No held-out median or global missingness filter is learned.
+4. **Remove constants and select features within training.** Remove probes with training variance ≤1×10⁻⁸ after imputation. Rank by ANOVA F using real training labels, resolving equal scores by ascending CpG ID, and select exactly 50. ANOVA (analysis of variance) measures differences between class means relative to within-class variation; it does not establish causation.
+5. **Keep classifier and generator transforms separate.** Fit the classifier's StandardScaler on real selected beta values only; it subtracts each feature's training mean and divides by its training standard deviation. The generator separately clips beta, takes a logit and fits a logit-space StandardScaler on those same real training rows. Held-out values do not fit either scaler.
+6. **Construct one of four training sets.** Use real rows alone; repeat real rows; interpolate same-class rows with SMOTE; or fit a new conditional denoising diffusion probabilistic model (DDPM) and add its generated beta rows. The same selected CpGs and classifier scaler are shared across branches within a split. Every augmentation preserves every original real training row.
+7. **Train the downstream classifier.** Shrinkage linear discriminant analysis (LDA) learns class means and a stabilized shared covariance estimate, producing a linear decision rule. Shrinkage stabilizes covariance estimation when samples are scarce. Its empirical priors (class probabilities inferred from training frequencies) change when augmentation makes classes equally frequent; this is part of the specified comparison.
+8. **Evaluate only real held-out rows.** Obtain CIN3 probabilities and apply the fixed 0.5 threshold. No synthetic test samples, test-based duration choice, generation selection or threshold tuning is used.
+9. **Save and summarize.** Predictions, metrics, diagnostics and generator checkpoints are stored per fold/method/seed. LOCO pools one prediction per real sample within each seed. Repeated CV pools within each repeat/seed first, then averages metrics. It does not pool repeated observations into an enlarged cohort or average probabilities into an ensemble.
+
+The inspected implementation follows this training-only design. Current saved split lists, selected IDs and scaler statistics are consistent across matched methods. No explicit patient grouping can be guaranteed because person IDs are missing; this is an evidence limitation, not a grouping feature secretly implemented in the diagrams.
+
+### A compact view of diffusion
+
+```mermaid
+flowchart LR
+    A[Real selected training beta features] --> B[Clip, logit and real-fit standardization]
+    B --> C[Forward Gaussian noising at sampled timestep]
+    C --> D[Train conditional denoiser to predict noise]
+    D --> E[Reverse sampling from Gaussian noise for Normal or CIN3]
+    E --> F[Undo standardization and apply stable sigmoid]
+    F --> G[Synthetic beta values]
+    G --> H[Add to real training rows]
+    H --> I[Fit downstream shrinkage LDA classifier]
+```
+
+An embedding is a learned numeric vector encoding the timestep or class. MLP means multilayer perceptron, a feed-forward neural network; SiLU (sigmoid linear unit) is its hidden activation. Gaussian noise is normally distributed noise. AdamW is the implemented gradient-based optimizer, with weight decay penalizing large weights. The training objective predicts injected noise, not diagnosis.
+
+The **generator is the DDPM**. The **predictive classifier is LDA**. Diffusion does not directly output patient diagnoses: it generates additional training feature rows, which are then used by LDA. This is a small custom denoising diffusion probabilistic model, not an exact or official reproduction of TabDDPM or another published tabular method.
+
+Implementation sources: [runner](src/methylation_diffusion/runner.py), [preprocessing](src/methylation_diffusion/preprocessing.py), [augmentation](src/methylation_diffusion/augmentation.py), [DDPM](src/methylation_diffusion/diffusion.py), [reporting](src/methylation_diffusion/reporting.py), [fixed methodology](docs/experiment_protocol.md).
+
+## 4. Actual model settings, generated-row policy and compute
+
+| Component | Executed setting |
+| --- | --- |
+| Features | ANOVA top 50 CpGs; deterministic CpG-ID tie-breaking; no top-10/top-200 sensitivity run |
+| Missingness/variance | Drop >25.00% training missingness; train-median imputation; retain variance >1e-8 |
+| Classifier | sklearn LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto", priors=None) |
+| Priors/threshold | Empirical training class priors; balanced after augmentation; probability threshold 0.5 |
+| Classifier scaling | StandardScaler fit only to real selected training beta values |
+| Random oversampling | Uniform sampling with replacement separately within each class; preserve originals |
+| SMOTE | Custom same-class Euclidean neighbors in selected unscaled beta space; k=min(5,n_class−1); uniform interpolation |
+| DDPM MLP | 50 feature inputs + 16 learned timestep + 16 learned class embedding coordinates; hidden 128→128; SiLU; 50 noise outputs |
+| DDPM trainable parameters | 35,218 including embeddings |
+| Forward process | z_t=sqrt(alpha_bar_t) z_0 + sqrt(1−alpha_bar_t) Gaussian noise |
+| Noise schedule | 100 steps; linear Gaussian noise variances beta_t from 0.0001 to 0.02; alpha_t=1−beta_t |
+| Objective | Mean squared error between predicted and injected Gaussian noise |
+| Optimizer | AdamW; learning rate 0.001; weight decay 0.01 |
+| Training budget | Exactly 2,000 updates; each minibatch samples training indices with replacement; min(32, training N) rows |
+| Conditioning | Learned timestep embedding for steps 0–99 and class embedding for labels 0/1 |
+| Augmentation seeds | 17, 42, 2026 for every augmented method; no best-seed choice |
+| Generator sampling seeds | 100017, 100042, 102026 (training seed +100000); independent of minibatch stream |
+| Reverse process | DDPM reverse mean with posterior variance beta_t(1−alpha_bar_previous)/(1−alpha_bar_t); final step adds no noise |
+| Generator transform | Clip beta to [0.0001,0.9999], logit=log(beta/(1−beta)), fit real-training mean/std |
+| Inverse transform | Undo logit standardization and apply scipy expit (stable sigmoid) to obtain bounded beta values |
+| Failure policy | Nonfinite loss/generation raises a recorded failure; no rejection, resampling or numerical retry; zero primary failures |
+| Training-loss logging | 101 recorded points per fit: every 20 iterations, beginning at update 1, plus update 2000 |
+| Split seeds | 1701, 4201, 202601 for repeated stratified CV; repeat indices 0, 1, 2 |
+| Real-only seed field | 0 labels a deterministic baseline record, not a searched augmentation seed |
+
+Table sources: [protocol](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml), [model code](src/methylation_diffusion/diffusion.py), [oversampling code](src/methylation_diffusion/augmentation.py), [saved diagnostics](outputs/diagnostics/primary/), [environment log](outputs/logs/primary_environment.json).
+
+For each real training partition, let `n_max` be the larger class count. Each augmentation reaches **2×n_max rows per class**, hence **4×n_max total rows**, while preserving all real rows. The number added to class c is `2×n_max − n_c`. Random oversampling adds repeats; SMOTE and diffusion add synthetic feature rows. Real-only retains its original class counts. A separate generator is trained in every diffusion fold/seed; no global generator is reused across outer folds. Even numerically identical source-training configurations in two transfer target evaluations have separately saved runs, not a new independent source cohort.
+
+| Training protocol | Real training rows per split | Final augmented rows PER CLASS | Final total training rows | Added rows per method/seed/split |
+| --- | --- | --- | --- | --- |
+| GSE99511_loco | 52–56 | 56–66 | 112–132 | 60–80 |
+| GSE99511_cv | 51–52 | 56–58 | 112–116 | 61–65 |
+| GSE46306_strict_cv | 29–30 | 32 | 64 | 34–35 |
+| GSE46306_reconciled_cv | 29–31 | 32 | 64 | 33–35 |
+| transfer_99511_strict | 64 | 72 | 144 | 80 |
+| transfer_99511_reconciled | 64 | 72 | 144 | 80 |
+| transfer_46306_99511 | 37 | 40 | 80 | 43 |
+
+Count-table sources: [per-run metrics](outputs/metrics/primary/), [diffusion class-count diagnostics](outputs/diagnostics/primary/), [split manifest](outputs/splits/splits.json). The same count targets are used by random oversampling, SMOTE and diffusion. Ranges describe different training partitions, not uncertainty or newly recruited people. For example, transfer from all 64 GSE99511 samples uses 28 Normal+36 CIN3, targets 72+72 total rows and adds 44 Normal+36 CIN3 rows; transfer from strict GSE46306 uses 20+17 real rows, targets 40+40 and adds 20+23.
+
+### Compute actually recorded
+
+The saved hardware record describes an Intel Core i5-13450HX (16 logical processors), 16,873,545,728 bytes RAM (about 15.71 GiB), and an available RTX 3050 with 6,144 MiB VRAM. The executed PyTorch wheel is CPU-only (`torch_cuda=false`), and diffusion uses one CPU thread. CUDA/auto selection exists in source but was not exercised; a CUDA-enabled PyTorch installation would be needed to use that path.
+
+The recorded primary runner interval is **382.00 seconds (6.37 minutes)** for split preprocessing and model runs. It excludes source hashing/loading, installation, audit, smoke checks and report verification, so it is not the entire project's elapsed time. Per-run timers begin after shared feature selection/scaling; they include augmentation, classification, evaluation/prediction writing, but not the common fold preprocessing. DDPM generator timers cover training, sampling and checkpoint writing and differ from the broader per-run timers. Individual generator fits took about 1.59–3.23 seconds. These are machine/run observations, not general speed guarantees.
+
+Sources: [hardware record](reports/execution_environment.json), [runtime record](reports/execution_runtime.json), [per-run timers](outputs/metrics/primary/), [generator diagnostics](outputs/diagnostics/primary/).
+
+## 5. Evaluation protocols and leakage safeguards
+
+### GSE99511 LOCO versus random CV
+
+**LOCO (leave-one-chip-out)** holds out one complete verified Sentrix chip at a time, training on the other five. All six chips are retained. Each seed yields 64 out-of-fold (OOF) real predictions: each sample was predicted by a model that did not train on its chip. Pooled OOF BA weights the classes across the entire cohort. An unweighted mean of the six chip BAs gives each chip equal weight and is a different statistic; both are reported below. All six observed chips contain both classes, so no chip BA is undefined in this completed dataset.
+
+The secondary GSE99511 analysis uses **five-fold stratified CV repeated three times**. Stratification approximately preserves class proportions; training and test folds can share chips. It is not chip-grouped evaluation and cannot replace LOCO. These two protocols answer different generalization questions even though they use the same 64 sample IDs.
+
+### GSE46306 within-dataset evaluation and sensitivity
+
+The strict cohort uses five-fold stratified CV repeated three times, with repeat seeds 1701, 4201, 202601. It is not grouped CV because suitable chip/person groups were not independently verified. A random split within this cohort does not establish transfer to unseen chips.
+
+For the reconciled 38-sample sensitivity, every original strict-cohort sample retains its training/test assignment. The added CIN3 sample GSM1128506 is assigned to test fold 0, 1 and 2 in repeats 0, 1 and 2, respectively, and is in training in the other folds of each repeat. The assignment was predefined and identical for every method. Strict versus reconciled differences can reflect both a changed training cohort and a changed evaluation cohort; they are not a fair contest in which to choose a winner.
+
+### Transfer in both directions
+
+GSE99511→GSE46306 trains on all 64 GSE99511 samples and evaluates the strict 37-sample target and the reconciled 38-sample sensitivity target separately. GSE46306→GSE99511 trains on the strict 37-sample source only and evaluates all 64 GSE99511 target samples. There is no reconciled-source reverse-transfer experiment in the saved suite.
+
+Each direction uses the 451,345 shared available CpG IDs. Feature filtering, imputation, ANOVA, both scalers, the generator, LDA and the decision threshold use source information only (the threshold is fixed, not fitted). No joint source/target normalization is performed. A new chip within GSE99511 is still a within-study test; crossing from one accession/study to another changes cohort sampling and preprocessing as well. Transfer here is exploratory, not untouched external confirmation.
+
+### Implementation and artifact evidence
+
+- [Preprocessor](src/methylation_diffusion/preprocessing.py) fits missingness, medians, variance and label-dependent ranks only to its supplied training array. [Runner](src/methylation_diffusion/runner.py) supplies the saved training IDs, then calls `transform` for held-out rows.
+- The classifier scaler is fitted once to real training features before branching; augmented values cannot alter it. Generator logit statistics are fitted inside the real-training-only `generate` function. Generated samples are not ranked against test labels or filtered by test performance.
+- Saved splits have disjoint accession IDs. LOCO also asserts disjoint chip sets. This summary rechecks those lists and verifies saved prediction labels against the cohort manifests; absent person IDs prevent a stronger person-level overlap guarantee.
+- [Artifact verification](reports/artifact_verification.json) records checks of real-fitted classifier/generator statistics, 2,000-update checkpoint budgets, matched selected CpGs/scalers, prediction metrics and saved-sampler replay. That earlier verifier inspected checkpoints and replayed sampling; it did not train models. This documentation task reads those saved findings and recalculates prediction metrics only.
+- [Tests](tests/test_pipeline.py) cover training-only transforms, tie-breaking/filtering, augmented counts/bounds/determinism, metrics and fixed sensitivity assignments. The saved [test record](reports/test_verification.json) reports five passes. No tests are rerun for this summary because the test suite itself includes tiny generator-training checks.
+- No inner validation, hyperparameter search, threshold tuning or optional feature-count comparison was executed. Fixed primary settings avoid using outer-test outcomes to select these values.
+
+No split/list/threshold/metric inconsistency or direct held-out fitting was found in the inspected primary implementation and saved artifacts. That is limited verification evidence, not proof that every historical data-preparation step or person identity is leakage-free.
+
+## 6. Verified numerical results
+
+### How the tables were calculated
+
+Every probability CSV in `outputs/predictions/primary/` was read. The positive decision is probability ≥0.5, and ROC AUC uses the saved continuous probabilities. Metrics were first calculated for every fold, then **pooled within each repeat/seed**, and only then summarized. There are 130 pooled evaluation streams: 10 per LOCO or transfer protocol and 30 per repeated-CV protocol. The real-only stream is stored once per split (seed field 0), not copied to manufacture three baseline replicates.
+
+Protocol tables show means over complete pooled streams. BA variability is the population standard deviation (ddof=0), expressed in percentage points (pp), across the predefined repeats/seeds; ROC AUC and the other means are averaged at the same level. These are descriptive variations, not confidence intervals, independent-person replicates or significance tests. Repeated samples and synthetic rows never enlarge N. No predictions are ensembled.
+
+Every downstream classifier in these tables is **shrinkage LDA with 50 CpGs** and the same fixed hyperparameters. Real N is the number of unique real evaluated sample IDs per pooled stream. Supporting confusion counts are **mean counts per complete stream**, not sums across repeatedly predicted people; fractional averages are intentional. Individual counts are integers in the underlying files and in the crossing ledgers. Rounded mean counts may sum to N with a 0.01 rounding discrepancy.
+
+Runtime totals sum the saved method-specific timers across every fold and seed; real-only is run once rather than three times. They exclude shared fold preprocessing. A positive ΔBA means improvement over the real-only mean under the **same protocol**. “≥80 mean” tests the protocol mean; individual crossings are analyzed separately.
+
+### 6.1 GSE99511: six-fold leave-one-chip-out (primary)
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 64 | 56.55% ± 0.00 pp | 57.81% | 0.5804 | 66.67% | 46.43% | 61.54% | 64.00% | No |
+| Random oversampling | LDA | 50 | 64 | 56.42% ± 1.60 pp | 56.77% | 0.5956 | 59.26% | 53.57% | 62.16% | 60.67% | No |
+| SMOTE | LDA | 50 | 64 | 59.66% ± 1.60 pp | 60.42% | 0.5962 | 65.74% | 53.57% | 64.57% | 65.14% | No |
+| Diffusion + real | LDA | 50 | 64 | 54.37% ± 2.49 pp | 55.21% | 0.5858 | 61.11% | 47.62% | 59.94% | 60.50% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 24.00 | 13.00 | 15.00 | 12.00 | +0.00 | 1 | 6 | 0.09 | 0.01 |
+| Random oversampling | 21.33 | 15.00 | 13.00 | 14.67 | -0.13 | 3 | 18 | 0.18 | 0.01 |
+| SMOTE | 23.67 | 15.00 | 13.00 | 12.33 | +3.11 | 3 | 18 | 0.18 | 0.01 |
+| Diffusion + real | 22.00 | 13.33 | 14.67 | 14.00 | -2.18 | 3 | 18 | 32.14 | 1.71 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `GSE99511_loco_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.2 GSE99511: repeated five-fold stratified CV (secondary)
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 64 | 58.20% ± 1.05 pp | 58.33% | 0.6055 | 59.26% | 57.14% | 64.10% | 61.49% | No |
+| Random oversampling | LDA | 50 | 64 | 54.81% ± 1.71 pp | 54.86% | 0.5513 | 55.25% | 54.37% | 61.16% | 57.77% | No |
+| SMOTE | LDA | 50 | 64 | 52.80% ± 2.42 pp | 52.95% | 0.5587 | 54.01% | 51.59% | 58.87% | 56.16% | No |
+| Diffusion + real | LDA | 50 | 64 | 53.35% ± 4.14 pp | 53.47% | 0.5412 | 54.32% | 52.38% | 59.65% | 56.69% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 21.33 | 16.00 | 12.00 | 14.67 | +0.00 | 3 | 15 | 0.16 | 0.01 |
+| Random oversampling | 19.89 | 15.22 | 12.78 | 16.11 | -3.40 | 9 | 45 | 0.45 | 0.01 |
+| SMOTE | 19.44 | 14.44 | 13.56 | 16.56 | -5.40 | 9 | 45 | 0.43 | 0.01 |
+| Diffusion + real | 19.56 | 14.67 | 13.33 | 16.44 | -4.85 | 9 | 45 | 76.22 | 1.69 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `GSE99511_cv_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.3 GSE46306 strict: repeated five-fold stratified CV (primary)
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 37 | 82.40% ± 5.34 pp | 82.88% | 0.8912 | 76.47% | 88.33% | 84.52% | 80.22% | Yes |
+| Random oversampling | LDA | 50 | 37 | 80.13% ± 5.68 pp | 80.48% | 0.8730 | 75.82% | 84.44% | 80.46% | 77.99% | Yes |
+| SMOTE | LDA | 50 | 37 | 81.24% ± 5.83 pp | 81.68% | 0.8786 | 75.82% | 86.67% | 82.70% | 79.05% | Yes |
+| Diffusion + real | LDA | 50 | 37 | 77.60% ± 4.98 pp | 77.48% | 0.8551 | 79.08% | 76.11% | 73.71% | 76.18% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 13.00 | 17.67 | 2.33 | 4.00 | +0.00 | 3 | 15 | 0.14 | 0.01 |
+| Random oversampling | 12.89 | 16.89 | 3.11 | 4.11 | -2.27 | 9 | 45 | 0.43 | 0.01 |
+| SMOTE | 12.89 | 17.33 | 2.67 | 4.11 | -1.16 | 9 | 45 | 0.45 | 0.01 |
+| Diffusion + real | 13.44 | 15.22 | 4.78 | 3.56 | -4.80 | 9 | 45 | 74.81 | 1.66 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `GSE46306_strict_cv_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.4 GSE46306 reconciled: repeated five-fold stratified CV (sensitivity)
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 38 | 78.33% ± 1.94 pp | 78.95% | 0.8231 | 66.67% | 90.00% | 86.81% | 75.01% | No |
+| Random oversampling | LDA | 50 | 38 | 75.37% ± 2.49 pp | 75.73% | 0.8019 | 68.52% | 82.22% | 77.96% | 72.67% | No |
+| SMOTE | LDA | 50 | 38 | 75.25% ± 2.36 pp | 75.73% | 0.8119 | 66.05% | 84.44% | 79.69% | 72.04% | No |
+| Diffusion + real | LDA | 50 | 38 | 68.73% ± 2.95 pp | 69.01% | 0.7657 | 63.58% | 73.89% | 68.96% | 65.97% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 12.00 | 18.00 | 2.00 | 6.00 | +0.00 | 3 | 15 | 0.15 | 0.01 |
+| Random oversampling | 12.33 | 16.44 | 3.56 | 5.67 | -2.96 | 9 | 45 | 0.43 | 0.01 |
+| SMOTE | 11.89 | 16.89 | 3.11 | 6.11 | -3.09 | 9 | 45 | 0.42 | 0.01 |
+| Diffusion + real | 11.44 | 14.78 | 5.22 | 6.56 | -9.60 | 9 | 45 | 74.97 | 1.66 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `GSE46306_reconciled_cv_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.5 Transfer: GSE99511 → GSE46306 strict
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 37 | 48.38% ± 0.00 pp | 51.35% | 0.4000 | 11.76% | 85.00% | 40.00% | 18.18% | No |
+| Random oversampling | LDA | 50 | 37 | 35.59% ± 2.60 pp | 35.14% | 0.3417 | 41.18% | 30.00% | 33.03% | 36.56% | No |
+| SMOTE | LDA | 50 | 37 | 41.23% ± 7.57 pp | 42.34% | 0.3603 | 27.45% | 55.00% | 37.53% | 29.55% | No |
+| Diffusion + real | LDA | 50 | 37 | 38.82% ± 2.44 pp | 37.84% | 0.3446 | 50.98% | 26.67% | 36.98% | 42.78% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 2.00 | 17.00 | 3.00 | 15.00 | +0.00 | 1 | 1 | 0.01 | 0.01 |
+| Random oversampling | 7.00 | 6.00 | 14.00 | 10.00 | -12.79 | 3 | 3 | 0.04 | 0.01 |
+| SMOTE | 4.67 | 11.00 | 9.00 | 12.33 | -7.16 | 3 | 3 | 0.03 | 0.01 |
+| Diffusion + real | 8.67 | 5.33 | 14.67 | 8.33 | -9.56 | 3 | 3 | 5.17 | 1.74 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `transfer_99511_strict_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.6 Transfer: GSE99511 → GSE46306 reconciled (target-cohort sensitivity)
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 38 | 50.83% ± 0.00 pp | 52.63% | 0.4306 | 16.67% | 85.00% | 50.00% | 25.00% | No |
+| Random oversampling | LDA | 50 | 38 | 37.22% ± 2.39 pp | 36.84% | 0.3690 | 44.44% | 30.00% | 36.11% | 39.75% | No |
+| SMOTE | LDA | 50 | 38 | 42.31% ± 6.61 pp | 42.98% | 0.3838 | 29.63% | 55.00% | 40.17% | 31.76% | No |
+| Diffusion + real | LDA | 50 | 38 | 39.26% ± 3.52 pp | 38.60% | 0.3569 | 51.85% | 26.67% | 38.58% | 44.14% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 3.00 | 17.00 | 3.00 | 15.00 | +0.00 | 1 | 1 | 0.01 | 0.01 |
+| Random oversampling | 8.00 | 6.00 | 14.00 | 10.00 | -13.61 | 3 | 3 | 0.03 | 0.01 |
+| SMOTE | 5.33 | 11.00 | 9.00 | 12.67 | -8.52 | 3 | 3 | 0.03 | 0.01 |
+| Diffusion + real | 9.33 | 5.33 | 14.67 | 8.67 | -11.57 | 3 | 3 | 5.08 | 1.69 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `transfer_99511_reconciled_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.7 Transfer: GSE46306 strict → GSE99511
+
+| Method | Classifier | CpGs | Real N | BA mean ± SD | Accuracy | ROC AUC | CIN3 recall | Normal specificity | Precision | F1 | ≥80 mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | LDA | 50 | 64 | 45.83% ± 0.00 pp | 51.56% | 0.3383 | 91.67% | 0.00% | 54.10% | 68.04% | No |
+| Random oversampling | LDA | 50 | 64 | 47.22% ± 0.58 pp | 52.08% | 0.3459 | 86.11% | 8.33% | 54.70% | 66.90% | No |
+| SMOTE | LDA | 50 | 64 | 46.23% ± 1.13 pp | 51.56% | 0.3629 | 88.89% | 3.57% | 54.23% | 67.36% | No |
+| Diffusion + real | LDA | 50 | 64 | 44.18% ± 3.67 pp | 46.88% | 0.3702 | 65.74% | 22.62% | 51.27% | 56.61% | No |
+
+| Method | Mean TP | Mean TN | Mean FP | Mean FN | ΔBA vs real (pp) | Pooled streams | Fits | Runtime total (s) | Median per fit (s) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Real only | 33.00 | 0.00 | 28.00 | 3.00 | +0.00 | 1 | 1 | 0.01 | 0.01 |
+| Random oversampling | 31.00 | 2.33 | 25.67 | 5.00 | +1.39 | 3 | 3 | 0.03 | 0.01 |
+| SMOTE | 32.00 | 1.00 | 27.00 | 4.00 | +0.40 | 3 | 3 | 0.03 | 0.01 |
+| Diffusion + real | 23.67 | 6.33 | 21.67 | 12.33 | -1.65 | 3 | 3 | 5.09 | 1.70 |
+
+Sources for both tables: [prediction directory](outputs/predictions/primary/) and [per-run metric directory](outputs/metrics/primary/) with prefix `transfer_46306_99511_r<repeat>_f<fold>_<method>_s<seed>`; [pooled metrics](reports/pooled_metrics.csv), [aggregate summary](reports/summary.csv), [saved splits](outputs/splits/splits.json), [classifier/features config](configs/protocol.yaml), [DDPM config](configs/diffusion.yaml). Precision/F1 were newly recalculated from those predictions for this summary; existing CSVs were left unchanged. Classifier is the fixed shrinkage LDA, not diffusion itself.
+
+### 6.8 LOCO: pooled participant/sample weighting versus equal chip weighting
+
+| Method | Pooled OOF BA mean ± seed SD | Unweighted mean of six chip BAs ± seed SD |
+| --- | --- | --- |
+| Real only | 56.55% ± 0.00 pp | 57.36% ± 0.00 pp |
+| Random oversampling | 56.42% ± 1.60 pp | 58.48% ± 1.74 pp |
+| SMOTE | 59.66% ± 1.60 pp | 61.89% ± 1.52 pp |
+| Diffusion + real | 54.37% ± 2.49 pp | 56.44% ± 1.42 pp |
+
+Sources: [LOCO predictions](outputs/predictions/primary/), [chip mean metrics](reports/chip_mean_metrics.csv), [chip metrics](reports/chip_metrics.csv), [protocol](configs/protocol.yaml). Baseline seed SD is zero because it is deterministic and stored once, not because population uncertainty is zero.
+
+| Held-out chip | Normal N | CIN3 N | Real BA | Random BA ± seed SD | SMOTE BA ± seed SD | Diffusion BA ± seed SD |
+| --- | --- | --- | --- | --- | --- | --- |
+| 9340996068 | 3 | 7 | 69.05% ± 0.00 pp | 70.63% ± 6.83 pp | 78.57% ± 0.00 pp | 69.84% ± 6.83 pp |
+| 9340996078 | 4 | 8 | 68.75% ± 0.00 pp | 66.67% ± 2.95 pp | 70.83% ± 2.95 pp | 64.58% ± 5.89 pp |
+| 9340996136 | 4 | 7 | 60.71% ± 0.00 pp | 66.07% ± 0.00 pp | 68.45% ± 3.37 pp | 61.90% ± 5.89 pp |
+| 9340996138 | 4 | 7 | 55.36% ± 0.00 pp | 59.52% ± 5.89 pp | 47.02% ± 5.89 pp | 52.98% ± 3.37 pp |
+| 9376538107 | 4 | 4 | 62.50% ± 0.00 pp | 58.33% ± 5.89 pp | 75.00% ± 0.00 pp | 54.17% ± 5.89 pp |
+| 9828653103 | 9 | 3 | 27.78% ± 0.00 pp | 29.63% ± 2.62 pp | 31.48% ± 2.62 pp | 35.19% ± 10.48 pp |
+
+Sources: [chip metrics](reports/chip_metrics.csv), [real cohort chip labels](outputs/audits/GSE99511_manifest.csv), [LOCO split manifest](outputs/splits/splits.json), [protocol](configs/protocol.yaml). All six chips are included; no LOCO fold or pooled LOCO stream crossed 80.00% BA. The [per-chip plot](reports/figures/per_chip.png) visualizes this variation without establishing its biological or technical cause.
+
+### 6.9 Every predefined augmentation seed, averaged across repeats
+
+Each cell below is that seed's mean BA across the three repeats, or its one pooled LOCO/transfer BA when repeats do not apply. Seeds are reported together, never selected by their score. The baseline column averages its repeats once. This is not an ensemble.
+
+| Protocol | Method (LDA/50) | Seed 17 BA | Seed 42 BA | Seed 2026 BA | All-seed mean BA | Matched real BA |
+| --- | --- | --- | --- | --- | --- | --- |
+| GSE99511_loco | Random oversampling | 57.74% | 57.34% | 54.17% | 56.42% | 56.55% |
+| GSE99511_loco | SMOTE | 58.33% | 61.90% | 58.73% | 59.66% | 56.55% |
+| GSE99511_loco | Diffusion + real | 55.16% | 56.94% | 50.99% | 54.37% | 56.55% |
+| GSE99511_cv | Random oversampling | 55.75% | 55.03% | 53.64% | 54.81% | 58.20% |
+| GSE99511_cv | SMOTE | 52.58% | 54.10% | 51.72% | 52.80% | 58.20% |
+| GSE99511_cv | Diffusion + real | 53.17% | 54.43% | 52.45% | 53.35% | 58.20% |
+| GSE46306_strict_cv | Random oversampling | 79.07% | 80.74% | 80.59% | 80.13% | 82.40% |
+| GSE46306_strict_cv | SMOTE | 80.74% | 81.57% | 81.42% | 81.24% | 82.40% |
+| GSE46306_strict_cv | Diffusion + real | 78.38% | 76.86% | 77.55% | 77.60% | 82.40% |
+| GSE46306_reconciled_cv | Random oversampling | 75.19% | 76.02% | 74.91% | 75.37% | 78.33% |
+| GSE46306_reconciled_cv | SMOTE | 72.31% | 76.76% | 76.67% | 75.25% | 78.33% |
+| GSE46306_reconciled_cv | Diffusion + real | 68.98% | 68.33% | 68.89% | 68.73% | 78.33% |
+| transfer_99511_strict | Random oversampling | 38.97% | 35.15% | 32.65% | 35.59% | 48.38% |
+| transfer_99511_strict | SMOTE | 39.26% | 51.32% | 33.09% | 41.23% | 48.38% |
+| transfer_99511_strict | Diffusion + real | 41.47% | 39.41% | 35.59% | 38.82% | 48.38% |
+| transfer_99511_reconciled | Random oversampling | 40.28% | 36.94% | 34.44% | 37.22% | 50.83% |
+| transfer_99511_reconciled | SMOTE | 41.39% | 50.83% | 34.72% | 42.31% | 50.83% |
+| transfer_99511_reconciled | Diffusion + real | 42.78% | 40.56% | 34.44% | 39.26% | 50.83% |
+| transfer_46306_99511 | Random oversampling | 46.63% | 48.02% | 47.02% | 47.22% | 45.83% |
+| transfer_46306_99511 | SMOTE | 44.84% | 47.62% | 46.23% | 46.23% | 45.83% |
+| transfer_46306_99511 | Diffusion + real | 45.83% | 47.62% | 39.09% | 44.18% | 45.83% |
+
+Sources: [per-seed averages](reports/seed_average_metrics.csv), [repeat/seed pooled metrics](reports/pooled_metrics.csv), [primary prediction CSVs](outputs/predictions/primary/), [fixed seeds/config](configs/protocol.yaml). The baseline is reused in comparisons, not counted as independent augmentation runs.
+
+## 7. Which methods crossed 80.00% balanced accuracy, and why?
+
+### 7.1 Protocol-average crossings: only strict GSE46306 within-dataset CV
+
+The three rows below are the **only protocol means** at or above the benchmark. The strict cohort is primary; the reconciled cohort is sensitivity. All three use shrinkage LDA and 50 CpGs. A baseline crossing is not an augmentation improvement.
+
+| Protocol/cohort | Method | Classifier/CpGs | Mean BA | Mean AUC | Accuracy | CIN3 recall | Normal specificity | Precision | F1 | Same-protocol real BA | ΔBA (pp) | Pooled streams ≥80 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 80.13% | 0.8730 | 80.48% | 75.82% | 84.44% | 80.46% | 77.99% | 82.40% | -2.27 | 6/9 |
+| GSE46306_strict_cv | Real only | LDA/50 | 82.40% | 0.8912 | 82.88% | 76.47% | 88.33% | 84.52% | 80.22% | 82.40% | +0.00 | 2/3 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 81.24% | 0.8786 | 81.68% | 75.82% | 86.67% | 82.70% | 79.05% | 82.40% | -1.16 | 6/9 |
+
+Sources: [strict primary predictions](outputs/predictions/primary/), [pooled metrics](reports/pooled_metrics.csv), [summary](reports/summary.csv), [strict split assignments](outputs/splits/splits.json), [model config](configs/protocol.yaml). Values are shown to the required precision; underlying unrounded BA means are recomputed from probabilities, not inferred from rounded percentages. The real-only comparator for the two augmented averages is 82.40%, so both augmented protocol-average crossings still represent degradations.
+
+### 7.2 Every pooled repeat/seed crossing
+
+The next table lists **all 18** qualifying pooled evaluations: 17 strict-cohort streams and one reconciled real-only repeat. Each row pools five folds within exactly one repeat/seed. Repeat indices are zero-based. Every baseline comparison uses the same cohort, repeat and split assignments. The three diffusion crossings all occur in strict-cohort repeat 2; repeat-0/1 diffusion outcomes remain in the averages. This is descriptive variation, not selection of a “successful” seed.
+
+| Protocol/cohort | Method | Classifier/CpGs | Repeat | Seed | BA | AUC | Accuracy | CIN3 recall | Specificity | Precision | F1 | TP/TN/FP/FN | Matched real BA | ΔBA (pp) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GSE46306_reconciled_cv | Real only | LDA/50 | 1 | 0 | 80.83% | 0.8333 | 81.58% | 66.67% | 95.00% | 92.31% | 77.42% | 12/19/1/6 | 80.83% | +0.00 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 1 | 17 | 81.18% | 0.8794 | 81.08% | 82.35% | 80.00% | 77.78% | 80.00% | 14/16/4/3 | 86.18% | -5.00 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 1 | 42 | 86.18% | 0.9088 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 1 | 2026 | 83.24% | 0.9118 | 83.78% | 76.47% | 90.00% | 86.67% | 81.25% | 13/18/2/4 | 86.18% | -2.94 |
+| GSE46306_strict_cv | Real only | LDA/50 | 1 | 0 | 86.18% | 0.9088 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 1 | 17 | 83.68% | 0.9059 | 83.78% | 82.35% | 85.00% | 82.35% | 82.35% | 14/17/3/3 | 86.18% | -2.50 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 1 | 42 | 86.18% | 0.9059 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 1 | 2026 | 83.24% | 0.9029 | 83.78% | 76.47% | 90.00% | 86.67% | 81.25% | 13/18/2/4 | 86.18% | -2.94 |
+| GSE46306_strict_cv | Diffusion + real | LDA/50 | 2 | 17 | 86.62% | 0.8779 | 86.49% | 88.24% | 85.00% | 83.33% | 85.71% | 15/17/3/2 | 86.18% | +0.44 |
+| GSE46306_strict_cv | Diffusion + real | LDA/50 | 2 | 42 | 81.62% | 0.8706 | 81.08% | 88.24% | 75.00% | 75.00% | 81.08% | 15/15/5/2 | 86.18% | -4.56 |
+| GSE46306_strict_cv | Diffusion + real | LDA/50 | 2 | 2026 | 81.62% | 0.8588 | 81.08% | 88.24% | 75.00% | 75.00% | 81.08% | 15/15/5/2 | 86.18% | -4.56 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 2 | 17 | 83.68% | 0.8765 | 83.78% | 82.35% | 85.00% | 82.35% | 82.35% | 14/17/3/3 | 86.18% | -2.50 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 2 | 42 | 83.68% | 0.8838 | 83.78% | 82.35% | 85.00% | 82.35% | 82.35% | 14/17/3/3 | 86.18% | -2.50 |
+| GSE46306_strict_cv | Random oversampling | LDA/50 | 2 | 2026 | 86.18% | 0.8676 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | Real only | LDA/50 | 2 | 0 | 86.18% | 0.8941 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 2 | 17 | 86.18% | 0.8706 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 2 | 42 | 86.18% | 0.8779 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+| GSE46306_strict_cv | SMOTE | LDA/50 | 2 | 2026 | 86.18% | 0.8794 | 86.49% | 82.35% | 90.00% | 87.50% | 84.85% | 14/18/2/3 | 86.18% | +0.00 |
+
+Sources: [pooled metric CSV](reports/pooled_metrics.csv), [prediction directory](outputs/predictions/primary/), [run metric JSONs](outputs/metrics/primary/), [fixed config](configs/protocol.yaml). Each row's source predictions have prefix `<protocol>_r<repeat>_f0..4_<method>_s<seed>.csv`; its comparator uses the same prefix with `real_s0`. `real`/`random`/`smote`/`diffusion` are the exact method keys in filenames. All 50-CpG LDA settings are unchanged. Confusion counts in this table are integer counts for the listed real cohort, not averages or summed repeats.
+
+### 7.3 Consistency of augmentation changes
+
+A method may pass 80.00% while doing worse than the matched baseline. The following counts compare all paired complete pooled streams. “Win/tie/loss” refers only to BA; each augmentation seed is compared with its repeat's same real-only baseline. Fold wins compare the exact same held-out group. These exposures share people and are not independent statistical replicates.
+
+| Protocol | Method (LDA/50) | Mean ΔBA (pp) | Pooled win/tie/loss | Fold win/tie/loss | Pooled ΔBA range (pp) |
+| --- | --- | --- | --- | --- | --- |
+| GSE99511_loco | Random oversampling | -0.13 | 2/0/1 | 7/8/3 | -2.38 to +1.19 |
+| GSE99511_loco | SMOTE | +3.11 | 3/0/0 | 12/4/2 | +1.79 to +5.36 |
+| GSE99511_loco | Diffusion + real | -2.18 | 1/0/2 | 4/8/6 | -5.56 to +0.40 |
+| GSE99511_cv | Random oversampling | -3.40 | 0/0/9 | 8/17/20 | -4.96 to -0.60 |
+| GSE99511_cv | SMOTE | -5.40 | 0/0/9 | 4/19/22 | -9.52 to -2.78 |
+| GSE99511_cv | Diffusion + real | -4.85 | 2/0/7 | 10/9/26 | -10.91 to +3.17 |
+| GSE46306_strict_cv | Random oversampling | -2.27 | 0/2/7 | 1/36/8 | -5.00 to +0.00 |
+| GSE46306_strict_cv | SMOTE | -1.16 | 0/5/4 | 0/41/4 | -2.94 to +0.00 |
+| GSE46306_strict_cv | Diffusion + real | -4.80 | 1/0/8 | 7/20/18 | -10.00 to +0.44 |
+| GSE46306_reconciled_cv | Random oversampling | -2.96 | 3/1/5 | 4/29/12 | -7.78 to +2.78 |
+| GSE46306_reconciled_cv | SMOTE | -3.09 | 1/3/5 | 1/33/11 | -10.28 to +0.28 |
+| GSE46306_reconciled_cv | Diffusion + real | -9.60 | 0/0/9 | 5/16/24 | -12.50 to -5.00 |
+| transfer_99511_strict | Random oversampling | -12.79 | 0/0/3 | 0/0/3 | -15.74 to -9.41 |
+| transfer_99511_strict | SMOTE | -7.16 | 1/0/2 | 1/0/2 | -15.29 to +2.94 |
+| transfer_99511_strict | Diffusion + real | -9.56 | 0/0/3 | 0/0/3 | -12.79 to -6.91 |
+| transfer_99511_reconciled | Random oversampling | -13.61 | 0/0/3 | 0/0/3 | -16.39 to -10.56 |
+| transfer_99511_reconciled | SMOTE | -8.52 | 0/1/2 | 0/1/2 | -16.11 to +0.00 |
+| transfer_99511_reconciled | Diffusion + real | -11.57 | 0/0/3 | 0/0/3 | -16.39 to -8.06 |
+| transfer_46306_99511 | Random oversampling | +1.39 | 3/0/0 | 3/0/0 | +0.79 to +2.18 |
+| transfer_46306_99511 | SMOTE | +0.40 | 2/0/1 | 2/0/1 | -0.99 to +1.79 |
+| transfer_46306_99511 | Diffusion + real | -1.65 | 1/1/1 | 1/1/1 | -6.75 to +1.79 |
+
+Sources: [paired fold metrics](reports/fold_metrics.csv), [paired pooled metrics](reports/pooled_metrics.csv), [matching prediction CSVs](outputs/predictions/primary/), [saved splits](outputs/splits/splits.json), [protocol](configs/protocol.yaml). Matching uses experiment/repeat/fold, never a historical baseline or a different cohort.
+
+### 7.4 Individual-fold crossings: exhaustive ledger
+
+There are **144 qualifying individual fold/method/seed runs** among the 540 saved primary runs. A repeated-CV test fold contains only 7–13 real samples, so a small number of changed decisions can move BA substantially. No LOCO or cross-study-transfer fold crosses 80.00%. These are not 144 independent successes or 144 newly validated cohorts. Fold crossings are retained below even when their matched baseline is better or their overall protocol mean is below 80.00%.
+
+Every ledger row uses **LDA, 50 CpGs and threshold 0.5**. Run IDs encode the complete dataset/cohort/protocol, repeat, fold, method and seed; `GSE99511_cv` is secondary within-GSE99511 CV, `GSE46306_strict_cv` is strict primary CV, and `GSE46306_reconciled_cv` is the sensitivity CV. The run ID links to its prediction file. The baseline BA links to the exact same-fold real-only prediction file. Corresponding metric JSONs have the identical stem under [outputs/metrics/primary](outputs/metrics/primary/). Config: [protocol.yaml](configs/protocol.yaml). TP/TN/FP/FN and additional metrics in the ledger refer only to that row's real held-out fold.
+
+<details>
+<summary>Expand all 144 individual-fold benchmark crossings</summary>
+
+| Exact run (LDA/50) | Real N | BA | AUC | Accuracy | CIN3 recall | Specificity | Precision | F1 | TP/TN/FP/FN | Matched real BA | ΔBA (pp) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [GSE46306_reconciled_cv_r0_f3_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_diffusion_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f3_diffusion_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_diffusion_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r0_f3_diffusion_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_diffusion_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r0_f3_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_random_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r0_f3_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_random_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f3_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_random_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f3_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f3_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_smote_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r0_f3_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_smote_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f3_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_smote_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_diffusion_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_diffusion_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_diffusion_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_diffusion_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_diffusion_s2026.csv) | 7 | 83.33% | 0.9167 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_random_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +16.67 |
+| [GSE46306_reconciled_cv_r0_f4_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_random_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +16.67 |
+| [GSE46306_reconciled_cv_r0_f4_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_random_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_smote_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r0_f4_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_smote_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +16.67 |
+| [GSE46306_reconciled_cv_r0_f4_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_smote_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_diffusion_s17.csv) | 9 | 90.00% | 0.9000 | 88.89% | 80.00% | 100.00% | 100.00% | 88.89% | 4/4/0/1 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +10.00 |
+| [GSE46306_reconciled_cv_r1_f1_diffusion_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_diffusion_s2026.csv) | 9 | 90.00% | 0.9500 | 88.89% | 80.00% | 100.00% | 100.00% | 88.89% | 4/4/0/1 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +10.00 |
+| [GSE46306_reconciled_cv_r1_f1_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_random_s17.csv) | 9 | 90.00% | 0.9000 | 88.89% | 80.00% | 100.00% | 100.00% | 88.89% | 4/4/0/1 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +10.00 |
+| [GSE46306_reconciled_cv_r1_f1_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_random_s42.csv) | 9 | 80.00% | 1.0000 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_random_s2026.csv) | 9 | 80.00% | 0.9500 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | 9 | 80.00% | 0.8500 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_smote_s17.csv) | 9 | 80.00% | 0.9500 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_smote_s42.csv) | 9 | 80.00% | 0.9000 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f1_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_smote_s2026.csv) | 9 | 80.00% | 0.9500 | 77.78% | 60.00% | 100.00% | 100.00% | 75.00% | 3/4/0/2 | [80.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f2_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_diffusion_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_diffusion_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_diffusion_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_random_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_random_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_random_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f2_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_smote_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_smote_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f2_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_smote_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f2_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f3_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_random_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f3_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_real_s0.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r1_f3_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_smote_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r1_f3_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_smote_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [100.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r1_f3_real_s0.csv) | -12.50 |
+| [GSE46306_reconciled_cv_r2_f2_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_diffusion_s17.csv) | 8 | 87.50% | 0.8125 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [75.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_real_s0.csv) | +12.50 |
+| [GSE46306_reconciled_cv_r2_f2_diffusion_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_diffusion_s42.csv) | 8 | 87.50% | 0.9375 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [75.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_real_s0.csv) | +12.50 |
+| [GSE46306_reconciled_cv_r2_f2_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_random_s17.csv) | 8 | 87.50% | 0.8750 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [75.00%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f2_real_s0.csv) | +12.50 |
+| [GSE46306_reconciled_cv_r2_f3_diffusion_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_diffusion_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_diffusion_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_diffusion_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_diffusion_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_diffusion_s2026.csv) | 7 | 83.33% | 0.9167 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_random_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_random_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_random_s2026.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_smote_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_smote_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f3_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_smote_s2026.csv) | 7 | 83.33% | 0.9167 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_random_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_random_s17.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_random_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_random_s42.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_random_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_random_s2026.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_real_s0](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_smote_s17](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_smote_s17.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_smote_s42](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_smote_s42.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_reconciled_cv_r2_f4_smote_s2026](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_smote_s2026.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_reconciled_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f2_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r0_f2_diffusion_s2026.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [66.67%](outputs/predictions/primary/GSE46306_strict_cv_r0_f2_real_s0.csv) | +16.67 |
+| [GSE46306_strict_cv_r0_f3_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r0_f3_diffusion_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [75.00%](outputs/predictions/primary/GSE46306_strict_cv_r0_f3_real_s0.csv) | +12.50 |
+| [GSE46306_strict_cv_r0_f4_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_diffusion_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_diffusion_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_diffusion_s2026.csv) | 7 | 83.33% | 0.9167 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_random_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_random_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_random_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_smote_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_smote_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r0_f4_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_smote_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r0_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_diffusion_s17.csv) | 8 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 4/4/0/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +12.50 |
+| [GSE46306_strict_cv_r1_f1_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_diffusion_s2026.csv) | 8 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 4/4/0/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +12.50 |
+| [GSE46306_strict_cv_r1_f1_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_random_s17.csv) | 8 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 4/4/0/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +12.50 |
+| [GSE46306_strict_cv_r1_f1_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_random_s42.csv) | 8 | 87.50% | 1.0000 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_random_s2026.csv) | 8 | 87.50% | 1.0000 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | 8 | 87.50% | 0.9375 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_smote_s17.csv) | 8 | 87.50% | 1.0000 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_smote_s42.csv) | 8 | 87.50% | 1.0000 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f1_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_smote_s2026.csv) | 8 | 87.50% | 1.0000 | 87.50% | 75.00% | 100.00% | 100.00% | 85.71% | 3/4/0/1 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_diffusion_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_random_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_random_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_smote_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f2_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_smote_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_diffusion_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_diffusion_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_random_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_random_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_random_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_smote_s17.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_smote_s42.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f3_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_smote_s2026.csv) | 7 | 87.50% | 1.0000 | 85.71% | 100.00% | 75.00% | 75.00% | 85.71% | 3/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r1_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_diffusion_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_diffusion_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_random_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_random_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | -16.67 |
+| [GSE46306_strict_cv_r1_f4_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_smote_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_smote_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r1_f4_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_smote_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r1_f4_real_s0.csv) | -16.67 |
+| [GSE46306_strict_cv_r2_f0_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_random_s42.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f0_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_random_s2026.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f0_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f0_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_smote_s17.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f0_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_smote_s42.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f0_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_smote_s2026.csv) | 8 | 87.50% | 1.0000 | 87.50% | 100.00% | 75.00% | 80.00% | 88.89% | 4/3/1/0 | [87.50%](outputs/predictions/primary/GSE46306_strict_cv_r2_f0_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_diffusion_s17.csv) | 7 | 83.33% | 0.7500 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_diffusion_s42.csv) | 7 | 83.33% | 0.9167 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_random_s17.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_random_s2026.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_smote_s17.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_smote_s42.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f2_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_smote_s2026.csv) | 7 | 83.33% | 0.8333 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f2_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_diffusion_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +16.67 |
+| [GSE46306_strict_cv_r2_f3_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_diffusion_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +16.67 |
+| [GSE46306_strict_cv_r2_f3_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_diffusion_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +16.67 |
+| [GSE46306_strict_cv_r2_f3_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_random_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_random_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_random_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_smote_s17.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_smote_s42.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f3_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_smote_s2026.csv) | 7 | 83.33% | 1.0000 | 85.71% | 66.67% | 100.00% | 100.00% | 80.00% | 2/4/0/1 | [83.33%](outputs/predictions/primary/GSE46306_strict_cv_r2_f3_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_diffusion_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_diffusion_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_diffusion_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_diffusion_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_diffusion_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_diffusion_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_random_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_random_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_random_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_random_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_random_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_random_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_real_s0](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_smote_s17](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_smote_s17.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_smote_s42](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_smote_s42.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE46306_strict_cv_r2_f4_smote_s2026](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_smote_s2026.csv) | 7 | 100.00% | 1.0000 | 100.00% | 100.00% | 100.00% | 100.00% | 100.00% | 3/4/0/0 | [100.00%](outputs/predictions/primary/GSE46306_strict_cv_r2_f4_real_s0.csv) | +0.00 |
+| [GSE99511_cv_r1_f1_real_s0](outputs/predictions/primary/GSE99511_cv_r1_f1_real_s0.csv) | 13 | 84.52% | 0.9762 | 84.62% | 85.71% | 83.33% | 85.71% | 85.71% | 6/5/1/1 | [84.52%](outputs/predictions/primary/GSE99511_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE99511_cv_r1_f1_smote_s17](outputs/predictions/primary/GSE99511_cv_r1_f1_smote_s17.csv) | 13 | 84.52% | 0.9048 | 84.62% | 85.71% | 83.33% | 85.71% | 85.71% | 6/5/1/1 | [84.52%](outputs/predictions/primary/GSE99511_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE99511_cv_r1_f1_smote_s42](outputs/predictions/primary/GSE99511_cv_r1_f1_smote_s42.csv) | 13 | 84.52% | 0.9762 | 84.62% | 85.71% | 83.33% | 85.71% | 85.71% | 6/5/1/1 | [84.52%](outputs/predictions/primary/GSE99511_cv_r1_f1_real_s0.csv) | +0.00 |
+| [GSE99511_cv_r1_f1_smote_s2026](outputs/predictions/primary/GSE99511_cv_r1_f1_smote_s2026.csv) | 13 | 84.52% | 0.8571 | 84.62% | 85.71% | 83.33% | 85.71% | 85.71% | 6/5/1/1 | [84.52%](outputs/predictions/primary/GSE99511_cv_r1_f1_real_s0.csv) | +0.00 |
+
+</details>
+
+Ledger sources: the linked per-run prediction files above, [saved fold metrics](reports/fold_metrics.csv), [classifier/features/seed config](configs/protocol.yaml). This exhaustive list covers individual-fold crossings separately from the pooled-repeat and aggregate crossings; overlapping levels are not added together as independent evidence.
+
+### 7.5 Interpreting “why”: observations, hypotheses and alternatives
+
+**A. Directly supported observations**
+
+The only above-benchmark averages come from strict GSE46306 within-study random CV. The real-only baseline already exceeds the benchmark; augmentation is not necessary for that result. Random oversampling and SMOTE also exceed 80.00% on average but are worse than that same baseline. Diffusion's three pooled crossings are confined to repeat 2. Their matched real-only repeat has 86.18% BA, so two diffusion seed crossings are worse than baseline; the other is only a small positive change. The consistency table includes every seed and fold, rather than highlighting that one favorable comparison.
+
+Class balancing changes observed sensitivity and specificity. For strict GSE46306, diffusion's average sensitivity is higher than real-only but its specificity is lower; the loss in specificity outweighs the sensitivity increase in BA. The metric tables quantify that tradeoff. No dedicated experiment isolates whether it comes from class priors, synthetic feature geometry or another aspect of training. The only positive augmentation protocol-average BA changes relative to real-only are SMOTE under GSE99511 LOCO and random oversampling/SMOTE in reverse transfer; none reaches 80.00% in those protocols, and their consistency counts limit strong conclusions.
+
+Training loss declines and numerical checks show finite synthetic beta values without observed exact/near-real duplicates at the predefined tolerance. Those observations do not explain a classification benefit, because diffusion's aggregate matched BA changes are negative throughout.
+
+**B. Plausible mechanisms that remain unproven**
+
+Balancing changes LDA's empirical priors from observed real class frequencies to equal priors, and synthetic/repeated rows also change its estimated means/covariance. Either could shift the sensitivity/specificity tradeoff or decision boundary. Useful joint-pattern learning by diffusion is a hypothesis, not an established finding here. To attribute benefits to better joint modeling, a dedicated comparison separating class-prior effects and sample-distribution effects would be needed.
+
+Feature reduction to 50 sites and covariance shrinkage may stabilize a small-sample classifier, but all four branches use them, so this experiment cannot attribute method differences to those shared choices. Within-study random splits may share technical or cohort patterns that are absent in cross-study transfer. The weaker transfer results are compatible with distribution shift but do not establish its cause.
+
+The fixed 100-step linear DDPM schedule also leaves substantial terminal signal: product(1−beta_t) is about 0.3636. Training's final noised distribution therefore need not match the standard Gaussian used to begin reverse sampling. This is a potential engineering limitation, not a tested explanation of the negative results; no schedule or duration was changed after inspecting performance.
+
+**C. Alternative explanations and limitations**
+
+Small folds, split/seed variation, inherited preprocessing differences, cohort/HPV composition and chip-related patterns could contribute. No analysis identifies which of these causes the observed scores. All six verified GSE99511 chips contain both classes, but their class proportions and held-out results vary. GSE46306 Normal/CIN3 status also tracks HPV status in its metadata, limiting interpretation as HPV-positive clinical triage. Absent person identifiers prevent excluding repeated-person overlap with certainty.
+
+Both datasets had been examined previously; repeated development comparisons make these exploratory findings, even with the newly fixed protocol. The current training-only code and artifact checks provide no direct evidence of held-out fitting or inconsistent metric calculation. They cannot certify every earlier normalization/masking step or prove absence of every form of leakage. No affected primary result was discovered that must be relabeled as a leakage-driven success, but unverified patient identity and deposited preprocessing remain limitations. There is no causal evidence that diffusion learned disease biology, corrected batch effects or improved a clinical decision process.
+
+High ordinary accuracy or AUC without BA ≥80.00% is explicitly insufficient. For example, strict-cohort diffusion has mean ROC AUC 0.8551 but mean BA 77.60%; it does not meet the benchmark at the fixed operating threshold. Reconciled random oversampling/SMOTE also have AUC above 0.8000 while their BA means stay below 80.00%. No model or threshold was changed to turn these into favorable results.
+
+## 8. Generator diagnostics: what was observed and what it does not prove
+
+Each fit saved per-class real/generated feature means and standard deviations; real/generated correlation matrices and differences; same-class nearest-training distances; real-to-real distances excluding self; duplicate checks; boundary/invalid counts; training losses; runtime; and parameter count. An earlier checkpoint-replay verifier also saved nearest distances to **all** real training rows, not just the same class. No held-out sample was used to filter or select generations.
+
+| Diagnostic | Observed value |
+| --- | --- |
+| Separate generator fits | 162 |
+| Class-conditioned diagnostic blocks | 324 |
+| Invalid generated values | 0 |
+| Exact generated-to-real duplicate rows (same class) | 0 |
+| Near generated-to-real rows, max-coordinate tolerance 1e-6 (same class) | 0 |
+| Exact/near generated-to-real duplicate rows across all classes | 0 / 0 |
+| Generated-internal exact/near duplicate pairs | 0 / 0 |
+| Maximum boundary fraction (beta ≤0.0001 or ≥0.9999) | 0.00% |
+| Median mean-absolute correlation difference | 0.2033 |
+| Median first/last logged training MSE | 1.0067 / 0.3074 |
+
+Sources: [full per-fit diagnostics](outputs/diagnostics/primary/), [diagnostic summary](reports/diagnostic_summary.csv), [all-training neighbor diagnostics](reports/all_training_neighbor_diagnostics.csv), [artifact verification](reports/artifact_verification.json), [generator config](configs/diffusion.yaml). Correlation differences compare feature pairs in selected beta space. Zero boundary/duplicate flags mean only that these defined checks did not detect those patterns; they do not rule out subtler memorization, partial collapse, lack of biological realism or privacy risk. Low noise-prediction MSE is a training-objective result, not evidence of useful augmentation.
+
+Useful saved figures: [per-chip BA](reports/figures/per_chip.png), [training losses](reports/figures/training_losses.png), [correlation/boundary distributions](reports/figures/synthesis_quality.png), [same-class distance comparisons](reports/figures/synthesis_distances.png), [all-training distance comparisons](reports/figures/all_training_neighbor_distances.png). Confusion plots under [reports/figures](reports/figures/) use repeat 0 and predefined augmentation seed 17, not the best seed; they are illustrative single streams, not ensemble confusions or averages across people repeated in CV.
+
+## 9. Interpretation across datasets and evidence-based conclusions
+
+**Did diffusion help relative to real-only?** No protocol-average matched BA improved. Its mean BA changes are negative for both within-dataset cohorts, GSE99511 secondary CV and all transfer evaluations. Individual fold/seed wins do not overturn those averages.
+
+**Did diffusion beat simpler augmentation?** Not consistently, and not in a way supporting a general benefit. The comparison below subtracts random-oversampling and SMOTE protocol means from diffusion's mean. Positive numbers mean diffusion is higher; the real-only differences remain negative.
+
+| Protocol | Diffusion − real (pp) | Diffusion − random (pp) | Diffusion − SMOTE (pp) |
+| --- | --- | --- | --- |
+| GSE99511_loco | -2.18 | -2.05 | -5.29 |
+| GSE99511_cv | -4.85 | -1.46 | +0.55 |
+| GSE46306_strict_cv | -4.80 | -2.53 | -3.64 |
+| GSE46306_reconciled_cv | -9.60 | -6.64 | -6.51 |
+| transfer_99511_strict | -9.56 | +3.24 | -2.40 |
+| transfer_99511_reconciled | -11.57 | +2.04 | -3.06 |
+| transfer_46306_99511 | -1.65 | -3.04 | -2.05 |
+
+Sources: [recomputed prediction-based protocol means](outputs/predictions/primary/), [existing summary](reports/summary.csv), [fixed classifier/features config](configs/protocol.yaml). Diffusion exceeds SMOTE slightly in GSE99511 secondary random CV and exceeds random oversampling in the two GSE99511-source transfer target analyses, while still remaining below real-only in each. It is not a consistent winner over simpler augmentation.
+
+**Were gains consistent across datasets?** No. GSE99511's modest SMOTE LOCO gain does not reproduce as a positive average within GSE46306; random CV and LOCO themselves are different tests. Diffusion shows no positive protocol-average matched BA on either study.
+
+**Did within-study performance transfer across studies?** The evidence does not support reliable cross-study generalization for this fixed pipeline. Strict-GSE46306 within-study real-only BA exceeds 80.00%, but transfer scores in both directions are much lower and all transfer means stay below 80.00%. This demonstrates limited observed transfer performance, not proof that methylation has no useful biological signal or that any particular batch mechanism caused failure. Different target cohorts, real class counts, preprocessing and train/test definitions prevent ranking all protocol scores as if they were the same exam.
+
+**Was the benchmark observed?** Yes: strict GSE46306 repeated stratified CV protocol means cross it for real-only (82.40%), random oversampling (80.13%) and SMOTE (81.24%). Diffusion's strict mean is 77.60%. Its three individual repeat-2 seed streams cross it, including one only slightly above the same-repeat real-only baseline; none is promoted to the primary headline. Reconciled real-only crosses it in one repeat but not its protocol mean. The exhaustive fold ledger records additional local crossings, not additional successful aggregate protocols. No LOCO or transfer protocol mean crosses it.
+
+**What remains uncertain?** Whether other independently prespecified generators, source-only tuning or substantially larger cohorts could help; how much observed variation reflects biology, cohort sampling, HPV status, technical processing or chip effects; whether unrecorded person relationships exist; and whether performance would hold in a genuinely independent clinical cohort. These questions were not answered by this implementation.
+
+### Principal limitations
+
+The real cohorts are small (64, 37 and 38 sample IDs), while the available inputs include hundreds of thousands of CpGs. Fold-local feature selection reduces dimensionality for modeling but can still be unstable. Selected feature associations and synthesis diagnostics do not establish biological mechanisms. Synthetic samples add rows, not independent people or new clinical evidence.
+
+GSE99511 chip composition and held-out results vary; GSE46306 lacks verified grouping and has a truncated local series file, a metadata-missing diagnosis reconciled only in sensitivity, contradictory scale descriptions and incompletely established deposited filtering provenance. Unique sample IDs do not establish unique people. GSE99511 self-samples and GSE46306 cervical tissue differ in collection context, and source preprocessing differs. Both studies were previously examined, so even cross-study results are exploratory. No untouched clinical validation, clinical utility assessment or significance claim is provided.
+
+## 10. Inconsistencies and missing evidence found during this summary
+
+1. **No primary prediction/metric inconsistency found.** All 540 primary records match the current source/config/data-manifest/split fingerprint, and recalculated fold/pooled/protocol scores agree with existing metric CSV/JSON values within floating-point tolerance. Saved labels agree with cohort manifests, threshold decisions agree with probabilities, and split IDs are disjoint. Precision and F1 were missing from the earlier reports, but were calculable from predictions and are included here without altering those reports.
+2. **A damaged input is already documented.** The local GSE46306 series gzip is truncated. Readable metadata and representative rows were usable; the complete processed supplement supplies model inputs. This is not silently treated as a fully verified series table. Original exclusion of cg00979000 remains unexplained.
+3. **Person/batch and historical preprocessing evidence is incomplete.** There are no verified GSE46306 chip or person groups, no complete person-identity guarantee for either dataset, and no complete historical IDAT processing execution record. Source filenames and intended pipeline code do not prove every historical mask flag. These gaps limit stronger claims, despite the fold-local current implementation.
+4. **Smoke results have a different code/config fingerprint.** Twelve non-scientific smoke runs were saved, but their fingerprint differs from the final primary fingerprint. They demonstrate an earlier smoke snapshot, not a verified exact-final-code smoke rerun. They are excluded from all scientific tables. This summary did not rerun them because training is prohibited for this task.
+5. **Some YAML-looking settings are fixed in code.** The current numeric values agree, but the augmentation function hardcodes the multiplier 2, the metric function hardcodes threshold 0.5/benchmark 0.8, and duplicate diagnostics hardcode their tolerances. The DDPM implementation always uses a linear schedule despite the descriptive schedule field. Editing those YAML labels alone would not fully reconfigure the implementation. This does not change the executed fixed-primary results; it is a reproducibility/configurability caveat, not a silent fix.
+6. **Resume is completed-run reuse, not optimizer continuation.** The runner skips completed compatible prediction/metric pairs. Failed/incomplete fits restart. Although generator checkpoints include optimizer state, no mid-training restoration path is implemented. Classifier weights/full fitted LDA objects and raw generated matrices are not saved; prediction files support metric recalculation, and generator checkpoint sidecars support audit/replay. Reproducing a fitted classifier itself requires rerunning its training pipeline.
+7. **Fingerprint scope has limits.** It covers Python files under `src`, YAML configs, source-hash manifest and split manifest. It does not include wrapper scripts, tests, dependency versions or the external data bytes directly. The runner separately verifies actual external source hashes, and versions are recorded, but automatic reuse does not independently invalidate a changed dependency environment or wrapper script. Saved verification JSONs are evidence of earlier checks, not immutable certificates.
+8. **Timing and diagnostic scope are bounded.** The 382-second timer is the primary runner's internal interval, not setup-to-finish elapsed time. Per-method timings omit shared preprocessing. Initial diagnostics use same-class neighbor references; an earlier sampler-replay verification supplements them with all-class training references. No new diagnoses, raw-data repairs, training runs, tuning or pipeline changes were performed for this summary.
+
+Sources: [metric code](src/methylation_diffusion/evaluation.py), [augmentation code](src/methylation_diffusion/augmentation.py), [DDPM](src/methylation_diffusion/diffusion.py), [resume/fingerprint code](src/methylation_diffusion/common.py), [runner](src/methylation_diffusion/runner.py), [smoke environment](outputs/logs/smoke_environment.json), [primary environment](outputs/logs/primary_environment.json), [resume verification](reports/resume_verification.json), [artifact verification](reports/artifact_verification.json).
+
+## 11. Reproducibility and file map
+
+### Configuration and dependency records
+
+- [configs/protocol.yaml](configs/protocol.yaml): 50 CpGs, filter thresholds, fixed LDA parameters/threshold, augmentation and CV seeds, benchmark and no tuning.
+- [configs/diffusion.yaml](configs/diffusion.yaml): architecture, transforms, noise schedule endpoints/steps, optimizer budget and CPU settings.
+- [configs/experiments.yaml](configs/experiments.yaml): four methods and seven declared protocol names; no optional feature-count sensitivity enabled. The split manifest determines the actual run partitions.
+- [configs/paths.example.yaml](configs/paths.example.yaml): default sibling external data path. Optional `configs/paths.local.yaml` overrides it and is Git-ignored; it was not needed for this default-path execution. Do not put datasets inside the project.
+- [requirements.lock.txt](requirements.lock.txt), [requirements.txt](requirements.txt), [pyproject.toml](pyproject.toml), [executed environment](outputs/logs/primary_environment.json): Python 3.10.16; NumPy 2.2.6; pandas 2.3.3; SciPy 1.15.3; scikit-learn 1.7.2; PyArrow 25.0.1; PyTorch 2.14.1 CPU. The source supports Python ≥3.10, but these are the recorded versions for the actual run.
+
+The executed `.venv/pyvenv.cfg` records `include-system-site-packages = true`. The fresh-install commands below use an isolated environment and the saved dependency lock rather than requiring that inherited-package setting.
+
+The following commands describe the implemented pipeline and its reproducible entry points. **They are reference instructions, not commands rerun while writing this summary.** `pytest` and the smoke command include tiny training; the full experiment command trains missing/incompatible runs. Do not run those when a documentation-only recalculation is intended.
+
+```powershell
+Set-Location 'D:\coding\python\ML RESEARCH PROJECT\diffusion+methylation'
+
+# Fresh installation, if needed; the executed project already has .venv.
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+.\.venv\Scripts\python.exe -m pip install -e . --no-deps
+
+# Optional path override; edit data_root using forward slashes in YAML.
+Copy-Item configs\paths.example.yaml configs\paths.local.yaml
+
+# Audit, split creation, checks, non-scientific smoke, and primary suite.
+.\.venv\Scripts\python.exe scripts\audit_data.py
+.\.venv\Scripts\python.exe scripts\supplement_audit.py
+.\.venv\Scripts\python.exe scripts\make_splits.py
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe scripts\run_smoke_test.py
+.\.venv\Scripts\python.exe scripts\run_experiments.py
+
+# Verify saved fitted artifacts and regenerate existing aggregate reports.
+# verify_results replays saved generator sampling without retraining.
+.\.venv\Scripts\python.exe scripts\verify_results.py
+.\.venv\Scripts\python.exe scripts\build_report.py
+.\.venv\Scripts\python.exe scripts\verify_html.py
+Start-Process reports\results.html
+```
+
+`build_report.py` recalculates metrics from predictions without training, but it **rewrites README.md and the existing reports**, so it was deliberately not used for this documentation-only task. `verify_results.py` also rewrites diagnostic/verification artifacts; its earlier saved verification was read instead. `verify_html.py` uses installed Chrome/Edge headless rendering and verifies report-table/CSV agreement. All three are documented entry points, not harmless read-only commands in every respect.
+
+Run/resume the saved primary suite with `.\.venv\Scripts\python.exe scripts\run_experiments.py`. Completed compatible runs are skipped; the saved resume verification checked 162 unchanged checkpoint files and zero newly completed runs on a one-partition resume. A specific protocol can be selected with `--experiment GSE99511_loco` or any of the seven names in the results tables. `--limit 1` limits execution to one partition and must not be called a full study.
+
+### Output locations and traceability
+
+| Location | What it contains |
+| --- | --- |
+| outputs/audits/ | Source hashes/paths; cohort manifests; scale evidence; series metadata; audit results |
+| outputs/splits/splits.json | All 54 saved train/test partitions, shared by methods |
+| outputs/predictions/primary/ | 540 real held-out prediction CSVs; sample, label, probability, predicted class and chip |
+| outputs/metrics/primary/ | 540 per-run JSONs; status, fingerprint, feature IDs, training-fit IDs/statistics, timing and scores |
+| outputs/diagnostics/primary/ | Training-only generation statistics, losses and class counts; replay supplements |
+| outputs/checkpoints/primary/ | 162 generator .pt files and JSON sidecars; architecture, transforms, weights, optimizer, seeds and preprocessing evidence |
+| outputs/logs/ | Executed environment and timing JSONs; locally rendered HTML/screenshot evidence |
+| outputs/*/smoke/ | Separate non-scientific smoke outputs; excluded from scientific results |
+| reports/summary.csv; pooled_metrics.csv; fold_metrics.csv | Protocol means, per-repeat/seed OOF metrics, and per-fold metrics |
+| reports/chip_metrics.csv; chip_mean_metrics.csv | Per-chip and unweighted-chip summaries, separate from pooled OOF |
+| reports/seed_average_metrics.csv | Every predefined augmentation seed, averaged across repeats |
+| reports/diagnostic_summary.csv; all_training_neighbor_diagnostics.csv | Small aggregate synthesis diagnostics |
+| reports/final_report.md; results.html; figures/ | Existing human-readable report, browser-verified tables and figures |
+| notebooks/explore_results.ipynb | Inspection notebook reading saved aggregate CSVs |
+| overall_summary.readme | This comprehensive Markdown summary, with newly derived precision/F1 and crossing ledger |
+
+Table sources: [loader/audit](src/methylation_diffusion/data.py), [runner](src/methylation_diffusion/runner.py), [report builder](scripts/build_report.py), [artifact verifier](scripts/verify_results.py), [Git exclusions](.gitignore). Local predictions/manifests/checkpoints are ignored by Git, while small aggregate reports are retained. No code license or dataset redistribution rights are assumed. No credentials or raw participant-level data are reproduced in this summary; links identify local evidence rather than embedding private metadata.
+
+### Verification performed for this document
+
+All 540 primary prediction files were recomputed at the fixed threshold, all continuous-score AUCs were recalculated, all 130 complete pooled streams and 28 protocol/method means were checked against existing metrics, and all 144 fold / 18 pooled / 3 aggregate benchmark crossings were enumerated. Feature-count consistency, source/config/split fingerprint agreement, manifest labels, threshold decisions, disjoint saved sample IDs and LOCO chip separation were checked. Training was not called. Existing source, configs, reports, predictions, metrics, diagnostics, splits and checkpoints were preserved, as was README.md.
+
+Current verified primary fingerprint: `623e94c182280a17869938ceaffb67243405b8741444067a76956ab98831a686`. Documentation recalculation evidence is saved locally in [outputs/logs/overall_summary_verification.json](outputs/logs/overall_summary_verification.json). All printed percentages use two decimal places and AUCs four decimals; benchmark decisions and comparisons use unrounded values.

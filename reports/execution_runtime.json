@@ -1,0 +1,8 @@
+{
+  "primary_suite_wall_seconds": 382.0,
+  "completed_runs": 540,
+  "failed_runs": 0,
+  "diffusion_fits": 162,
+  "optimizer_updates_per_fit": 2000,
+  "source": "Measured runner perf_counter around split preprocessing and model runs; excludes source hashing/loading, initial audit, installation, smoke, and report verification"
+}

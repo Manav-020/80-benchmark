@@ -1,0 +1,14 @@
+hidden: 128
+embedding: 16
+steps: 100
+beta_start: 0.0001
+beta_end: 0.02
+schedule: linear
+updates: 2000
+learning_rate: 0.001
+weight_decay: 0.01
+batch_size: 32
+epsilon: 0.0001
+device: cpu
+threads: 1
+numerical_retries: 0

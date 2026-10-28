@@ -1,0 +1,6 @@
+{
+  "compatible_partition_skipped": true,
+  "no_checkpoint_rewritten": true,
+  "checked_checkpoints": 162,
+  "stdout": "primary: 0 newly completed runs in 2.3s"
+}

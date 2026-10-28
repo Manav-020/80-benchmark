@@ -1,0 +1,38 @@
+[
+  {
+    "filename": "beta_values.parquet",
+    "bytes": 246771853,
+    "sha256": "91634dac5b7ef4bbfec6b1de662d21db6394c8aa5b52245ba42ca8280190c5af",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE99511"
+  },
+  {
+    "filename": "sample_metadata.csv",
+    "bytes": 3714,
+    "sha256": "ea2b2c1bd9ab2000efdb0fdb5272cc6d9261e3517284d73f7bd57729a0362de8",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE99511"
+  },
+  {
+    "filename": "metadata.csv",
+    "bytes": 10137,
+    "sha256": "17ed2a98c4a76a76c9588f59013da9d19afbeb3344184e1e322c4568246e6b27",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE99511"
+  },
+  {
+    "filename": "GSE46306_Matrix_processed2.txt.gz",
+    "bytes": 200931059,
+    "sha256": "f970b8c8688b8ea7318319b9e38e03e2d117494928b3dc150810ad220346d883",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE46306"
+  },
+  {
+    "filename": "GSE46306_Matrix_signal_intensities2.txt.gz",
+    "bytes": 398354237,
+    "sha256": "5e907020b78bb4a6b21218e02ef0beb8827c0c2b004a1965c8dd78cab23101e8",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE46306"
+  },
+  {
+    "filename": "GSE46306_series_matrix.txt.gz",
+    "bytes": 31743581,
+    "sha256": "8a917f4f1ab27c8e6f014caa08583d1517306bd32747dd8362329d65b8f12123",
+    "accession_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE46306"
+  }
+]

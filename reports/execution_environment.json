@@ -1,0 +1,10 @@
+{
+  "processor": "13th Gen Intel Core i5-13450HX",
+  "logical_processors": 16,
+  "physical_memory_bytes": 16873545728,
+  "available_gpu": "NVIDIA GeForce RTX 3050, 6144 MiB",
+  "used_device": "cpu",
+  "pytorch_threads": 1,
+  "python": "3.10.16",
+  "note": "Measured with Win32_ComputerSystem, Win32_Processor and nvidia-smi. CPU-only PyTorch wheel installed in project-local environment."
+}

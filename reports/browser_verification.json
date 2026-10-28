@@ -1,0 +1,8 @@
+{
+  "browser": "chrome.exe",
+  "returncode": 0,
+  "report_loaded": true,
+  "screenshot_saved_locally": true,
+  "all_images_exist": true,
+  "six_report_metrics_match_csv": true
+}

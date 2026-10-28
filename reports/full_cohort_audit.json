@@ -1,0 +1,14 @@
+{
+  "GSE46306_total_samples": 44,
+  "series_diagnosis_counts": {
+    "normal": 20,
+    "cin3": 17,
+    "cancer": 6,
+    "missing diagnosis": 1
+  },
+  "processed_total_rows": 454213,
+  "all44_beta_min": 0.0,
+  "all44_beta_max": 0.9993098,
+  "all44_missing_values": 0,
+  "processed_gzip_complete": true
+}

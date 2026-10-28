@@ -1,0 +1,58 @@
+{
+  "GSE99511": {
+    "samples": 64,
+    "probes": 482421,
+    "normal": 28,
+    "cin3": 36,
+    "min": 0.00456886226311326,
+    "max": 0.99573814868927,
+    "missing": 4957225,
+    "missing_fraction": 0.1605581859516895,
+    "duplicate_sample_ids": 0,
+    "duplicate_probe_ids": 0
+  },
+  "GSE46306_strict": {
+    "samples": 37,
+    "probes": 451345,
+    "normal": 20,
+    "cin3": 17,
+    "min": 0.0,
+    "max": 0.9982994198799133,
+    "missing": 0,
+    "missing_fraction": 0.0,
+    "duplicate_sample_ids": 0,
+    "duplicate_probe_ids": 0
+  },
+  "GSE46306_reconciled": {
+    "samples": 38,
+    "probes": 451345,
+    "normal": 20,
+    "cin3": 18,
+    "min": 0.0,
+    "max": 0.999309778213501,
+    "missing": 0,
+    "missing_fraction": 0.0,
+    "duplicate_sample_ids": 0,
+    "duplicate_probe_ids": 0
+  },
+  "shared_probes": 451345,
+  "series_integrity": "TRUNCATED gzip: intact metadata header and first 1000 table rows checked; series matrix not used as modeling input",
+  "scale_evidence": {
+    "representative_probes": 12,
+    "representative_series_shared_probes": 1000,
+    "series_processed_max_abs_error": 2.980194091506405e-08,
+    "decision": "Use deposited individual beta values directly",
+    "cg00979000_in_processed": false,
+    "cg00979000_signal_missing_authors": [
+      "2010040"
+    ],
+    "reconciled_label": {
+      "sample": "GSM1128506",
+      "author": "2010041",
+      "supplement_group": "g1",
+      "g1_verified_diagnosis": "cin3"
+    }
+  },
+  "grouping": "GSE99511: verified Sentrix IDs; GSE46306: no independently verified chip IDs. Title position prefixes not used as chip identities. No explicit person IDs; unique author IDs, repeated persons cannot be ruled out.",
+  "metadata_scale_contradiction": "Normalization control and backgroud subtraction in BeadStudio V2. Beta-value between 0 and 1 generated from unmethylated and methylated signal intensities"
+}

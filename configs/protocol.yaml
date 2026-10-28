@@ -1,0 +1,12 @@
+features: 50
+missingness_max: 0.25
+variance_min: 1.0e-8
+threshold: 0.5
+classifier: {solver: lsqr, shrinkage: auto, priors: null}
+augmentation_seeds: [17, 42, 2026]
+cv_seeds: [1701, 4201, 202601]
+folds: 5
+target_class_multiplier: 2
+near_duplicate_max_absolute_tolerance: 1.0e-6
+exploratory_benchmark: 0.8
+tuning: false
